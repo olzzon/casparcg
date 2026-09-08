@@ -79,6 +79,8 @@ FUNCTION (casparcg_add_module_project TARGET)
 	target_include_directories(${TARGET} PRIVATE
 			# TODO: This should be replaced by the linked libraries eventually
 			../..
+			# Out-of-tree modules (CASPARCG_EXTERNAL_MODULES) need the source root explicitly
+			${CMAKE_SOURCE_DIR}
 	)
 
 	# Setup linker and code loading
