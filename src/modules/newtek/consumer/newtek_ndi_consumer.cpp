@@ -82,6 +82,7 @@ struct newtek_ndi_consumer : public core::frame_consumer
     executor                             executor_;
 
     std::unique_ptr<NDIlib_send_instance_t, std::function<void(NDIlib_send_instance_t*)>> ndi_send_instance_;
+    core::const_frame in_flight_frame_; // buffer handed to send_send_video_async_v2, valid until the next call
     std::unique_ptr<NDIlib_send_advertiser_instance_t, std::function<void(NDIlib_send_advertiser_instance_t*)>>
         ndi_advertiser_instance_;
 
@@ -115,6 +116,10 @@ struct newtek_ndi_consumer : public core::frame_consumer
         if (send_thread.joinable()) {
             send_thread.interrupt();
             send_thread.join();
+        }
+        if (ndi_send_instance_) {
+            ndi_lib_->send_send_video_async_v2(*ndi_send_instance_, nullptr); // flush the in-flight frame
+            in_flight_frame_ = core::const_frame();
         }
     }
 
@@ -257,10 +262,16 @@ struct newtek_ndi_consumer : public core::frame_consumer
                                         frame.image_data(0).data() + (y * 2 + frame_no_ % 2) * format_desc_.width * 4,
                                         format_desc_.width * 4);
                         }
+                        ndi_lib_->send_send_video_v2(*ndi_send_instance_, &ndi_video_frame_);
                     } else {
+                        // Asynchronous send: the synchronous call blocks for the whole SpeedHQ encode
+                        // (> 1 frame time for 1080p50 BGRA on some machines), which starved the output
+                        // to ~30 fps and let the buffer (and latency) grow without bound. The SDK keeps
+                        // using the buffer until the next async call, so hold on to the frame.
                         ndi_video_frame_.p_data = const_cast<uint8_t*>(frame.image_data(0).begin());
+                        ndi_lib_->send_send_video_async_v2(*ndi_send_instance_, &ndi_video_frame_);
+                        in_flight_frame_ = frame;
                     }
-                    ndi_lib_->send_send_video_v2(*ndi_send_instance_, &ndi_video_frame_);
                     frame_no_++;
                     graph_->set_value("frame-time", frame_timer_.elapsed() * format_desc_.fps * 0.5);
                     std::this_thread::sleep_until(time_point);
@@ -279,6 +290,11 @@ struct newtek_ndi_consumer : public core::frame_consumer
             tick_timer_.restart();
             {
                 std::unique_lock<std::mutex> lock(buffer_mutex_);
+                // Never let the send queue (= output latency) grow without bound.
+                while (buffer_.size() >= 8) {
+                    buffer_.pop();
+                    graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
+                }
                 buffer_.push(std::move(frame));
             }
             worker_cond_.notify_all();
