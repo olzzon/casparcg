@@ -527,9 +527,11 @@ vec4 get_rgba_color()
         return vec4(get_sample(textures[PLANE0], uv).rgb * precision_factor[0], 1.0);
 	case 10:	// uyvy
 		{
+			// Planes are uploaded as R8G8B8A8 in memory order (unlike the GL backend's GL_BGRA), so the
+			// U Y V Y macropixel lands in .r .g .b .a: Cb is .r and Cr is .b.
 			float y  = get_sample(textures[PLANE0], uv).g * precision_factor[0];
-			float cb = get_sample(textures[PLANE1], uv).b * precision_factor[1];
-			float cr = get_sample(textures[PLANE1], uv).r * precision_factor[1];
+			float cb = get_sample(textures[PLANE1], uv).r * precision_factor[1];
+			float cr = get_sample(textures[PLANE1], uv).b * precision_factor[1];
 			return ycbcra_to_rgba(y, cb, cr, 1.0);
 		}
     case 11:    // gbrp
