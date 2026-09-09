@@ -228,7 +228,9 @@ class image_renderer
     }
 
     void draw(std::shared_ptr<texture>&  target_texture,
-              std::shared_ptr<texture>&& source_texture,
+              std::shared_ptr<texture>   source_texture, // by value: std::move at the call site really
+                                                         // consumes the mix precomp, so it is drawn once
+                                                         // and not a second time at the end of the layer
               core::video_format_desc    format_desc,
               core::blend_mode           blend_mode = core::blend_mode::normal)
     {
