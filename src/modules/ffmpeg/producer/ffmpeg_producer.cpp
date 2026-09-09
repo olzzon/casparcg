@@ -247,8 +247,9 @@ bool is_valid_file(const boost::filesystem::path& filename)
     }
 
     int         score = 0;
+    const auto  fname = filename.generic_string();
     AVProbeData pb    = {};
-    pb.filename       = filename.generic_string().c_str();
+    pb.filename       = fname.c_str();
 
     if (av_probe_input_format2(&pb, false, &score) != nullptr) {
         return true;
