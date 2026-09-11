@@ -146,11 +146,28 @@ class sting_producer : public frame_producer
             return static_cast<int64_t>(std::max(info_.trigger_point, overlay_duration));
         }
 
-        auto duration = static_cast<int64_t>(mask_producer_->nb_frames());
-        if (duration > -1) {
-            return std::optional<int64_t>(duration);
+        // No delta while the mask length is unknown: layer would read UINT32_MAX as "the foreground
+        // has already overrun its end" and play the background on the next frame, so a LOADBG AUTO
+        // loaded while the mask file is still being opened would cut instead of waiting for the out
+        // point. Once the mask has been probed the transition fires where it should.
+        auto duration = mask_duration();
+        if (duration) {
+            return std::optional<int64_t>(static_cast<int64_t>(*duration));
         }
         return {};
+    }
+
+    /**
+     * Length of the mask clip, or nothing while it is not known: a file producer reports UINT32_MAX
+     * until its own thread has opened and probed the file, and an endless source always does.
+     */
+    std::optional<uint32_t> mask_duration() const
+    {
+        auto duration = mask_producer_->nb_frames();
+        if (duration == UINT32_MAX) {
+            return {};
+        }
+        return duration;
     }
 
     std::optional<uint32_t> target_duration() const
@@ -168,15 +185,10 @@ class sting_producer : public frame_producer
         }
 
         // Sting mode logic
-        auto autoplay = auto_play_delta();
-        if (!autoplay) {
-            return {};
-        }
+        auto duration = mask_duration();
 
-        auto autoplay2 = static_cast<uint32_t>(*autoplay);
-
-        // If mask is infinite, rely on audio fade if specified
-        if (autoplay2 == UINT32_MAX) {
+        // If mask is infinite (or not probed yet), rely on audio fade if specified
+        if (!duration) {
             if (info_.audio_fade_duration < UINT32_MAX) {
                 return info_.audio_fade_start + info_.audio_fade_duration;
             } else {
@@ -187,9 +199,9 @@ class sting_producer : public frame_producer
 
         // Finite mask: Use mask duration, potentially extended by audio fade
         if (info_.audio_fade_duration < UINT32_MAX) {
-            return std::max(autoplay2, info_.audio_fade_duration + info_.audio_fade_start);
+            return std::max(*duration, info_.audio_fade_duration + info_.audio_fade_start);
         }
-        return autoplay2;
+        return *duration;
     }
 
     draw_frame receive_impl(const core::video_field field, int nb_samples) override

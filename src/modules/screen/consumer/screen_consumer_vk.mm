@@ -146,6 +146,13 @@ struct screen_consumer_vk
     std::atomic<bool> is_running_{true};
     std::atomic<bool> needs_resize_{false};
     std::atomic<bool> first_frame_presented_{false};
+    // Outlives the consumer, so a poll still in flight at shutdown has a valid target.
+    struct poll_state
+    {
+        std::atomic<bool> pending{false};
+        std::atomic<bool> should_close{false};
+    };
+    std::shared_ptr<poll_state> poll_state_ = std::make_shared<poll_state>();
     std::thread       thread_;
 
     screen_consumer_vk(const screen_consumer_vk&)            = delete;
@@ -461,38 +468,33 @@ struct screen_consumer_vk
         if (dispatch_semaphore_wait(cleanup_done, timeout) != 0) {
             CASPAR_LOG(warning) << print() << L" GLFW cleanup timed out - main thread may be blocked";
         }
+        dispatch_release(cleanup_done); // no ARC: leaks a mach port otherwise
     }
 
     bool poll()
     {
-        // macOS: Poll events on main thread via GCD
-        // Use dispatch_async with timeout to avoid deadlock during shutdown
+        // macOS: events must be pumped on the main thread. Post asynchronously, one poll in
+        // flight at a time: waiting on a fresh dispatch semaphore here runs hundreds of times
+        // per second and leaks a mach port each time (no ARC), which the kernel kills us for.
         if (!is_running_) {
             return true;
         }
 
-        __block bool should_close = false;
-        GLFWwindow* win = window_;
-        dispatch_semaphore_t poll_done = dispatch_semaphore_create(0);
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            glfwPollEvents();
-            if (glfwWindowShouldClose(win)) {
-                should_close = true;
-            }
-            dispatch_semaphore_signal(poll_done);
-        });
-
-        // Wait up to 100ms for poll to complete (short timeout since this is called frequently)
-        dispatch_time_t timeout = dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC);
-        if (dispatch_semaphore_wait(poll_done, timeout) != 0) {
-            // Timeout - main thread may be blocked, exit gracefully
-            CASPAR_LOG(warning) << L"[vk::screen] poll() timed out waiting for main thread";
-            is_running_ = false;
-            return true;
+        auto state = poll_state_;
+        if (!state->pending.exchange(true)) {
+            GLFWwindow* win = window_;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (win) {
+                    glfwPollEvents();
+                    if (glfwWindowShouldClose(win)) {
+                        state->should_close = true;
+                    }
+                }
+                state->pending = false;
+            });
         }
 
-        if (should_close) {
+        if (state->should_close) {
             CASPAR_LOG(info) << L"[vk::screen] Window close requested, stopping consumer";
             is_running_ = false;
             return true;
@@ -519,8 +521,10 @@ struct screen_consumer_vk
             dispatch_semaphore_signal(resize_done);
         });
 
-        dispatch_time_t timeout = dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC);
-        if (dispatch_semaphore_wait(resize_done, timeout) != 0) {
+        dispatch_time_t timeout   = dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC);
+        bool            timed_out = dispatch_semaphore_wait(resize_done, timeout) != 0;
+        dispatch_release(resize_done); // no ARC: leaks a mach port otherwise
+        if (timed_out) {
             // Timeout - main thread may be blocked
             return;
         }
