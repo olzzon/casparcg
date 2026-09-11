@@ -120,6 +120,8 @@ class Decoder
   public:
     std::shared_ptr<AVCodecContext> ctx;
 
+    int send_errors = 0;
+
     Decoder() = default;
 
     explicit Decoder(AVStream* stream)
@@ -173,7 +175,18 @@ class Decoder
                             packet = std::move(input.front());
                             input.pop();
                         }
-                        FF(avcodec_send_packet(ctx.get(), packet.get()));
+                        const auto send_ret = avcodec_send_packet(ctx.get(), packet.get());
+                        if (send_ret < 0) {
+                            // Drop the packet and keep decoding. Throwing here ends the decoder
+                            // thread, and the producer then sits on its last frame forever - one
+                            // corrupt access unit in a long file would freeze the channel.
+                            if (send_errors++ % 100 == 0) {
+                                char err[AV_ERROR_MAX_STRING_SIZE] = {0};
+                                av_strerror(send_ret, err, sizeof(err));
+                                CASPAR_LOG(warning) << "[ffmpeg] avcodec_send_packet: " << err
+                                                    << " (packet dropped, " << send_errors << " so far)";
+                            }
+                        }
                     } else if (ret == AVERROR_EOF) {
                         avcodec_flush_buffers(ctx.get());
                         av_frame->pts = next_pts;
